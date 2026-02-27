@@ -1,47 +1,44 @@
-# Design: Gemini Session Resumption
+# Design: Gemini Session Resumption (Discord Bot)
 
 ## Overview
 
-This document outlines the design for leveraging the Gemini CLI's saved session feature to optimize interactions in multi-turn contexts (like Discord channels or DM threads). By storing a mapping of contexts to their respective Gemini session IDs, we can resume an inactive context without the need to fetch and re-ingest the entire message history. This significantly saves on token usage, latency, and processing overhead.
+This document outlines the design for leveraging the Gemini CLI's saved session feature to optimize interactions specifically for our Discord Bot. By storing the Gemini session IDs directly within our existing conversational `contexts` table, we can resume an inactive context without the need to eagerly fetch and re-ingest the entire message history locally. This reduces token usage, lowers latency, and avoids creating new, redundant context-management services.
 
-## Architecture & Features
+## Architecture & Modifications
 
-### Core Components
+### 1. Database Schema Update (`src/db/database.py`)
+We will augment the existing `contexts` table to store the active Gemini session ID:
 
-*   **Context Manager:** A service responsible for tracking the active `session-id` for any given context (e.g., a Discord channel ID, conversation ID, or thread ID).
-*   **Session Store:** A persistent datastore (such as SQLite) that maintains the mapping between our internal context IDs and the Gemini CLI session IDs.
-*   **Message Router:** Intercepts incoming messages, looks up the corresponding session in the Session Store, and formulates the correct `gemini` CLI command.
+```sql
+ALTER TABLE contexts ADD COLUMN gemini_session_id TEXT;
+```
 
-### Session Lifecycle
+*   `gemini_session_id` (String, nullable): The session ID generated and returned by the Gemini CLI.
 
-1.  **Initialization:** When a message arrives in a new or expired context, a new Gemini session is initiated. The resulting `session-id` returned by the CLI is captured and stored in the Session Store against the context ID.
-2.  **Resumption:** When subsequent messages arrive in that context, the Message Router retrieves the stored `session-id`. It then dispatches the message using the resume flag:
-    ```bash
-    gemini -r "<session-id>" "<new_message_content>"
-    ```
-3.  **Invalidation/Expiry:** If a session expires or becomes invalid on the Gemini backend, the CLI should gracefully handle the error. The Message Router must catch this failure, invalidate the `session-id` in the Session Store, and fallback to re-ingesting the recent message history to start a new session.
-4.  **Context Switching:** The system naturally supports multiple concurrent conversations. Each context acts independently, with its own stored session state.
+### 2. Prompt Execution Changes (`src/app/runner.py`)
+Currently, `build_prompt_text` dynamically fetches the previous message via `get_messages_for_context` to provide short-term conversation history to the model:
 
-### Data Model
+```python
+relevant_messages = get_messages_for_context(context_id)
+# ... prepending previous message content ...
+```
 
-A simple key-value or relational model is sufficient for the Session Store.
+**New Execution Flow:**
+1.  **Check for Session:** `run_next_turn` will query the `contexts` database to see if `gemini_session_id` is populated.
+2.  **Resume Mode (Prompting):** If a session ID exists, `build_prompt_text` can optionally skip fetching historical messages entirely, as the backend already holds the conversational state. The prompt can focus solely on the latest user input.
+3.  **CLI Invocation:** `call_gemini_cli` will be updated to accept the `gemini_session_id` and append the `-r "<session_id>"` flags to the `gemini` subprocess command.
 
-*   `context_id` (String, Primary Key): The unique identifier for the conversation context (e.g., Discord Channel ID).
-*   `gemini_session_id` (String): The session ID provided by the Gemini CLI.
-*   `last_active_at` (Timestamp): Used to track session staleness and clean up inactive sessions.
-*   `metadata` (JSON): Optional field for storing context-specific settings or instructions.
+### 3. Session Lifecycle & Error Handling
 
-## Error Handling & Fallbacks
+*   **Initialization:** When a context is newly created or lacks a `gemini_session_id`, the CLI is invoked normally. The runner must capture the newly generated `session-id` from the Gemini CLI's JSON streaming output (e.g., via a status/metadata event) and save it to the `contexts` table for future turns.
+*   **Resumption & Fallbacks:**
+    *   If a session ID is injected but the Gemini backend reports it as expired or invalid, the CLI will output an error.
+    *   The `call_gemini_cli` loop must catch this specific semantic failure before yielding an error back to the user.
+    *   **Recovery:** The bot will clear the invalid `gemini_session_id` in the database, fall back to a "cold start" by concatenating the last N messages locally, and save the *new* session ID that the CLI ultimately returns.
+*   **Staleness/Pruning:** We can rely entirely on the backend's session expiry, triggering the fallback gracefully. No background cron jobs are strictly required to clean up old session IDs.
 
-*   **Session Not Found:** If the CLI returns an error indicating the session ID is no longer valid, the system must automatically downgrade to a "cold start." It will fetch the `$N` most recent messages from the context, concatenate them, and start a new session, storing the new `session-id`.
-*   **Concurrency:** If multiple messages arrive in the same context simultaneously, the system should queue them or manage locks to ensure they are appended to the Gemini session in the correct chronological order to maintain conversational coherence.
+## Benefits
 
-## Integration & Use Cases
-
-### 1. Discord Bot Integration
-
-The primary use case is the Discord bot. Each channel or direct message thread represents a context. The bot will use the stored `session-id` to respond faster and cheaper, avoiding the need to serialize the last 50 messages on every single user input.
-
-### 2. Multi-Agent Workflows
-
-In scenarios where a background task scheduler triggers an agent to perform work, the agent's progress can be maintained across execution boundaries by passing the `session-id` between runs.
+*   **Zero Infrastructure:** Entirely utilizes the existing SQLite `contexts` table and DB abstractions. No external managers needed.
+*   **Faster Turns:** Only the latest user message text needs to be fed into the `gemini` subprocess stdin.
+*   **Lower Token Costs:** Prevents re-sending identical prefix chat history on every single sequential turn in a long-running thread.
