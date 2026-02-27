@@ -47,6 +47,13 @@ def build():
             with open(item_path, 'r') as f:
                 md_content = f.read()
             
+            # Extract title from the first # H1
+            title = name.replace('-', ' ').title()
+            for line in md_content.split('\n'):
+                if line.startswith('# '):
+                    title = line[2:].strip()
+                    break
+
             html_content = markdown.markdown(md_content, extensions=['extra', 'smarty'])
             
             # Use design template
@@ -57,14 +64,14 @@ def build():
             else:
                 with open(template_path, 'r') as f:
                     template_text = f.read()
-                full_html = template_text.replace('{{content}}', html_content).replace('{{title}}', name.replace('-', ' ').title())
+                full_html = template_text.replace('{{content}}', html_content).replace('{{title}}', title)
             
             with open(os.path.join(DIST_DIR, name, 'index.html'), 'w') as f:
                 f.write(full_html)
                 
             projects.append({
                 'id': name,
-                'title': name.replace('-', ' ').title(),
+                'title': title,
                 'url': f'./{name}/',
                 'description': 'Markdown-based design document.',
                 'tag': 'Design Doc'
