@@ -5,18 +5,15 @@ import json
 from datetime import datetime
 
 # Configuration
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PROJECTS_DIR = os.path.join(BASE_DIR, 'projects')
-DIST_DIR = os.path.join(BASE_DIR, 'dist')
-TEMPLATES_DIR = os.path.join(BASE_DIR, 'templates')
+PROJECTS_DIR = 'projects'
+DIST_DIR = 'build_out'
+TEMPLATES_DIR = 'templates'
 
 def build():
     print(f"Starting build in {DIST_DIR}...")
     
-    # Reset dist directory
-    if os.path.exists(DIST_DIR):
-        shutil.rmtree(DIST_DIR)
-    os.makedirs(DIST_DIR)
+    # Ensure output directory exists (do not rmtree to avoid macOS transient locks)
+    os.makedirs(DIST_DIR, exist_ok=True)
 
     projects = []
 
@@ -42,7 +39,6 @@ def build():
             # Markdown project
             name = item[:-3]
             print(f"Processing Markdown project: {name}")
-            os.makedirs(os.path.join(DIST_DIR, name))
             
             with open(item_path, 'r') as f:
                 md_content = f.read()
@@ -66,13 +62,13 @@ def build():
                     template_text = f.read()
                 full_html = template_text.replace('{{content}}', html_content).replace('{{title}}', title)
             
-            with open(os.path.join(DIST_DIR, name, 'index.html'), 'w') as f:
+            with open(os.path.join(DIST_DIR, f'{name}.html'), 'w') as f:
                 f.write(full_html)
                 
             projects.append({
                 'id': name,
                 'title': title,
-                'url': f'./{name}/',
+                'url': f'./{name}.html',
                 'description': 'Markdown-based design document.',
                 'tag': 'Design Doc'
             })

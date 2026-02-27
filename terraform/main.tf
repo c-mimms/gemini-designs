@@ -53,7 +53,7 @@ resource "null_resource" "sync_dist" {
   }
 
   provisioner "local-exec" {
-    command = "aws s3 sync ../dist/ s3://${aws_s3_bucket.portfolio.bucket} --delete"
+    command = "aws s3 sync ../build_out/ s3://${aws_s3_bucket.portfolio.bucket} --delete"
   }
 }
 

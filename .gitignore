@@ -1,5 +1,5 @@
 # Build and Infrastructure
-out/
+build_out/
 terraform/.terraform/
 terraform/.terraform.lock.hcl
 terraform/terraform.tfstate
