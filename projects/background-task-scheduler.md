@@ -8,10 +8,31 @@ This document outlines the design for a CLI-based background task scheduler. The
 
 *   **Scheduler Daemon:** A long-running process that manages the task queue, handles timing, and manages a worker pool for task execution.
 *   **CLI (Command-Line Interface):** The primary interface for users to schedule, manage, and monitor tasks.
-*   **Task Store:** A SQLite database used for persistent storage of task metadata, schedules, and execution history.
-*   **Worker Pool:** A managed set of execution slots to prevent system overload from too many concurrent tasks.
+*   **Task Store:** A SQLite database used for persistent storage of task metadata, schedules, execution history, and captured task output.
+*   **Concurrency Limiter:** A mechanism to prevent system overload by ensuring only a maximum of X tasks run at once. Rather than a persistent worker pool, each task is spawned as an independent process.
 
 ## Architecture & Features
+
+### Task Model
+All tasks share a common scheduler envelope, regardless of executor type. This keeps scheduling, retries, monitoring, and lifecycle management consistent.
+
+Common envelope fields:
+*   `id`
+*   `schedule` (one-time or recurring)
+*   `state`
+*   `retry_policy`
+*   `timeout`
+*   `overlap_policy` (`skip`, `queue`, or `replace`)
+*   `notifications`
+*   `executor` (`shell` or `gemini`)
+
+Executor-specific payloads:
+*   **Shell tasks:** Inline command payload (e.g., `bash script.sh`).
+*   **Gemini tasks (agentic):** Structured payload with larger context passed by reference, not large inline CLI strings.
+    *   `payload_ref`: Path or artifact ID for prompt/context.
+    *   `inputs`: Structured runtime inputs (prompt variables, file references, metadata, model options).
+    *   `context_version`: Version identifier for reproducible reruns.
+    *   `context_hash`: Resolved content hash recorded per execution for audit/debugging.
 
 ### Task Lifecycle
 Tasks transition through the following states:
@@ -26,7 +47,9 @@ Tasks transition through the following states:
 The scheduler implements robust error recovery:
 *   **Automatic Retries:** Failed tasks can be configured with a retry policy (e.g., max 3 retries).
 *   **Exponential Backoff:** Retries will wait for increasing intervals (e.g., 1m, 5m, 15m) to allow transient issues to resolve.
-*   **Isolation:** Each task runs in its own shell environment to ensure that a crash in one task doesn't affect the daemon.
+*   **Isolation:** Each task runs in its own isolated process to ensure that a crash in one task doesn't affect the daemon.
+*   **Output Capture:** Standard output and error for *all* tasks (shell or Gemini) are captured and stored in the database.
+*   **Gemini Fallback:** If a standard shell task exceeds its maximum retry limit, the system can feed its captured error logs into a new Gemini task as a final automated fallback for diagnosis or remediation.
 
 ### Notifications
 The system can be configured to send notifications on task completion or failure via:
@@ -36,14 +59,18 @@ The system can be configured to send notifications on task completion or failure
 
 ## CLI Interface
 
-The CLI provide comprehensive commands for automation management.
+The CLI provides comprehensive commands for automation management.
 
 ### Commands
 
-*   `task schedule "<command>" --at "<time>"`: Schedule a one-time task.
+*   `task schedule "<command>" --at "<time>"`: Schedule a one-time task (shorthand for `--executor shell --command`).
     *   `--at`: Accepts natural language (e.g., "10:30pm", "tomorrow at 9am").
-*   `task schedule "<command>" --every "<interval>"`: Schedule a recurring task.
+*   `task schedule "<command>" --every "<interval>"`: Schedule a recurring task (shorthand for `--executor shell --command`).
     *   `--every`: Accepts intervals like "day", "hour", "30 minutes".
+*   `task schedule "<command>" --cron "<expression>"`: Schedule a recurring task using standard cron syntax (e.g., `0 8 * * 1-5`).
+*   `task schedule --executor shell --command "<command>" --at|--every|--cron ...`: Explicit shell-task format.
+*   `task schedule --executor gemini --context-file "<path>" --at|--every ...`: Schedule an agentic Gemini task using a structured context file reference.
+    *   `--context-file`: A YAML/JSON file containing large context and inputs for the Gemini executor.
 *   `task list`: List all tasks with their current status and next run time.
 *   `task cancel <task_id>`: Permanently remove a scheduled task.
 *   `task status`: Show the health and uptime of the scheduler daemon.
@@ -56,7 +83,7 @@ The CLI provide comprehensive commands for automation management.
 ### 1. Personal Reminders & Actions
 Schedule a task to trigger a customized reminder through other CLI tools.
 ```bash
-task schedule "gemini 'email chris@example.com with a reminder to call the doctor'" --at "tomorrow at 8am"
+task schedule "osascript -e 'display notification \"Call the doctor\" with title \"Reminder\"'" --at "tomorrow at 8am"
 ```
 
 ### 2. Knowledge Management
@@ -71,9 +98,22 @@ Regularly perform backups or cleanups.
 task schedule "bash /path/to/backup_script.sh" --every "week"
 ```
 
+### 4. Agentic Automation with Larger Context
+Run a Gemini task with externalized context so prompts and metadata can be large and versioned.
+```bash
+task schedule --executor gemini --context-file "/path/to/research_digest.yaml" --every "day"
+```
+
 ## Local Execution Environment
 
 *   **Platform:** Optimized for macOS and Linux home lab environments.
-*   **Persistence:** Task data is stored in `~/.tasks.db` (SQLite).
-*   **Logging:** Detailed execution logs are stored in `~/.tasks.log`.
-*   **Dependencies:** Built as a lightweight Python application or Go binary for easy installation.
+*   **Implementation:** Built as a Python application.
+*   **Daemon Management:** The background daemon can be supervised by a custom script (e.g., a `watchdog.sh`) to support advanced requirements like self-updating or automatic rollbacks to known-good versions, which are beyond the capabilities of standard `launchd` or `systemd`.
+*   **Environment:** To bridge the interactive vs. background gap, the scheduler will source an environment file (e.g., `~/.tasks.env`) before running shell tasks to load necessary `$PATH` and API keys.
+*   **Persistence:** Task data, schedules, and execution outputs are stored in `~/.tasks.db` (SQLite).
+*   **Context Artifacts:** Large Gemini task context files or serialized payloads are stored outside the CLI command text and referenced via `payload_ref` (e.g., `~/.tasks/context/`).
+*   **Logging:** Detailed daemon and execution logs are stored in `~/.tasks.log`.
+
+## Future Work
+
+*   **Log Retention:** Add garbage collection or retention policies to periodically prune the database and logs of old, completed task executions to manage disk usage.
